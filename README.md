@@ -1,56 +1,128 @@
-# SubTTS
+# 🎬 SubTTS
 
-**Hệ thống AI trích xuất phụ đề từ video và tạo giọng nói tự động (OCR + TTS).**
+<div align="center">
 
-## Tổng quan
+### 🌍 AI Subtitle Translation Platform
 
-SubTTS là dự án sử dụng **AI OCR** để trích xuất phụ đề từ video và **TTS (Text-to-Speech)** để tạo giọng nói tự động, phục vụ việc tạo video có phụ đề và âm thanh nhanh chóng.  
+**Translate Large Subtitle Files Efficiently**
 
-Dự án cũng bao gồm các tính năng **dịch phụ đề AI** đã hoàn thiện, có thể xử lý file lớn hơn **5.000 dòng**, và cơ chế **API rotation** để hoạt động ổn định với khối lượng lớn.
+Hệ thống dịch phụ đề bằng AI được tối ưu cho các file lớn, đồng thời đang phát triển các tính năng OCR và Text-to-Speech nhằm xây dựng quy trình xử lý video toàn diện.
 
-## Tính năng chính
+</div>
 
-### 1. OCR trích xuất phụ đề từ video
-- Nhận diện và trích xuất phụ đề trực tiếp từ video.
-- Hỗ trợ phụ đề **cứng (hardcoded)** không có file SRT.
-- Tự động phát hiện khung hình và nhận dạng văn bản.
+---
 
-### 2. TTS (Text-to-Speech)
-- Chuyển văn bản phụ đề thành giọng nói tự động.
-- Tạo video với audio đồng bộ phụ đề nhanh chóng.
-- Hỗ trợ nhiều giọng đọc và ngôn ngữ trong tương lai.
+# ✨ Giới thiệu
 
-### 3. Dịch phụ đề bằng AI (đã hoàn thiện)
-- Dịch nhanh **file phụ đề lớn hơn 5.000 dòng**.
-- Hỗ trợ các cặp ngôn ngữ phổ biến: Trung → Việt, Anh → Việt.
-- Dịch có ngữ cảnh, tối ưu cho phim, video giáo dục, TV show.
+**SubTTS** là dự án tập trung vào việc xử lý và dịch phụ đề bằng AI với khả năng xử lý các file có quy mô lớn.
 
-### 4. Hệ thống API rotation
-- Tự động chuyển đổi **API key** khi gặp giới hạn.
-- Giúp chạy OCR, TTS và dịch phụ đề liên tục không gián đoạn.
-- Hỗ trợ xử lý nhiều file cùng lúc.
+Hiện tại, hệ thống dịch phụ đề đã hoạt động ổn định và hỗ trợ xử lý các file có hơn **5.000 dòng** thông qua cơ chế chia nhỏ nội dung và **API Rotation**.
 
-### 5. Tạo video nhanh chóng
-- Pipeline tự động: OCR → dịch → TTS → video.
-- Giảm thiểu thao tác thủ công, tăng tốc sản xuất video.
-- Phù hợp với content creator và team localization.
+Bên cạnh đó, các tính năng:
 
-## Trường hợp sử dụng
+* 🔍 OCR trích xuất phụ đề từ video
+* 🗣️ Text-to-Speech (TTS)
+* 🎞️ Pipeline tạo video tự động
 
-- Tạo video có giọng đọc tự động từ video gốc.
-- Trích xuất và dịch phụ đề phim, TV show, anime.
-- Localization video giáo dục hoặc YouTube.
-- Tạo video social media nhanh chóng với TTS và phụ đề.
+đang trong quá trình phát triển.
 
-## Công nghệ sử dụng
+---
 
-- AI OCR engine
-- Text-to-Speech (TTS) engine
-- AI dịch phụ đề
-- Pipeline xử lý video tự động
-- Hệ thống API rotation
-- Xử lý batch nhiều file
+# 🚀 Trạng thái dự án
 
-## Mục tiêu
+| Tính năng                     | Trạng thái        |
+| ----------------------------- | ----------------- |
+| 🌍 AI Subtitle Translation    | ✅ Stable          |
+| 🔄 API Rotation               | ✅ Stable          |
+| 🔍 OCR Subtitle Extraction    | 🚧 In Development |
+| 🗣️ Text-to-Speech (TTS)      | 🚧 In Development |
+| 🎞️ Video Generation Pipeline | 🚧 Planned        |
 
-SubTTS hướng tới **tạo ra workflow toàn diện từ video gốc đến video có phụ đề và giọng đọc**, giúp **tạo nội dung đa ngôn ngữ nhanh chóng, giảm thao tác thủ công và tăng hiệu quả sản xuất**.
+---
+
+# 🌍 AI Subtitle Translation
+
+Tính năng cốt lõi hiện tại của SubTTS.
+
+### Nổi bật
+
+* ⚡ Xử lý file phụ đề lớn hơn **5.000 dòng**
+* 🧠 Dịch có ngữ cảnh
+* 🎬 Tối ưu cho phim và TV Show
+* 📚 Phù hợp video giáo dục
+* 🔄 Hỗ trợ API Rotation
+* 📦 Xử lý batch nhiều file
+
+### Ngôn ngữ hỗ trợ
+
+| Nguồn      | Đích      |
+| ---------- | --------- |
+| 🇨🇳 Trung | 🇻🇳 Việt |
+| 🇺🇸 Anh   | 🇻🇳 Việt |
+
+---
+
+# 🔄 API Rotation
+
+Hệ thống tự động chuyển đổi API khi gặp giới hạn sử dụng.
+
+### Lợi ích
+
+* Giảm nguy cơ gián đoạn
+* Tăng khả năng xử lý khối lượng lớn
+* Hỗ trợ dịch liên tục nhiều file
+* Tăng độ ổn định cho workflow
+
+---
+
+# 🔍 OCR Subtitle Extraction (Đang phát triển)
+
+Mục tiêu:
+
+* Trích xuất phụ đề từ video
+* Hỗ trợ hardcoded subtitles
+* Tự động phát hiện vùng phụ đề
+* Xuất ra định dạng SRT
+
+**Trạng thái:** 🚧 Development
+
+---
+
+# 🗣️ Text-to-Speech (Đang phát triển)
+
+Mục tiêu:
+
+* Chuyển phụ đề thành giọng nói
+* Đồng bộ audio với timeline
+* Hỗ trợ nhiều ngôn ngữ
+* Tích hợp vào pipeline video
+
+**Trạng thái:** 🚧 Development
+
+---
+
+# 🎯 Mục tiêu dài hạn
+
+Xây dựng workflow hoàn chỉnh:
+
+```text
+Video
+  ↓
+OCR
+  ↓
+Subtitle
+  ↓
+Translation
+  ↓
+TTS
+  ↓
+Final Video
+```
+
+Cho phép người dùng chuyển đổi từ video gốc sang video đa ngôn ngữ có giọng đọc AI với tối thiểu thao tác thủ công.
+
+---
+
+# 📌 Hiện tại
+
+SubTTS đang tập trung phát triển và tối ưu hóa hệ thống **AI Subtitle Translation**, đồng thời từng bước hoàn thiện các module OCR, TTS và Video Pipeline để trở thành một nền tảng localization video toàn diện.
