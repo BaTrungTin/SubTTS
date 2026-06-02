@@ -34,7 +34,7 @@ Bên cạnh đó, các tính năng:
 | ----------------------------- | ----------------- |
 | 🌍 AI Subtitle Translation    | ✅ Stable          |
 | 🔄 API Rotation               | ✅ Stable          |
-| 🔍 OCR Subtitle Extraction    | 🚧 In Development |
+| 🔍 OCR Subtitle Extraction    | ✅ Stable |
 | 🗣️ Text-to-Speech (TTS)      | 🚧 In Development |
 | 🎞️ Video Generation Pipeline | 🚧 Planned        |
 
