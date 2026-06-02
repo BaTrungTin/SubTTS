@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "PowerShell(pip install *)",
-      "Bash(python python_services/ocr_processor.py test.mp4 0 0 1 1 out.srt)"
-    ]
-  }
-}
