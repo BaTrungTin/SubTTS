@@ -1,0 +1,4 @@
+﻿unique 353 repeated exact text 2
+2 34
+2 5
+near dup within 5 lines 4

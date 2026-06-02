@@ -1,0 +1,8 @@
+# PaddleOCR — Python 3.11 hoặc 3.12 (không hỗ trợ 3.14)
+opencv-python>=4.8.0
+numpy>=1.24.0,<2.0.0
+paddleocr>=2.7.0,<3.0.0
+paddlepaddle>=2.6.0,<3.0.0
+
+# GPU NVIDIA (tuỳ chọn, thay paddlepaddle):
+# pip install paddlepaddle-gpu

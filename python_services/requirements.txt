@@ -1,8 +1,6 @@
-# Trích xuất phụ đề (PaddleOCR — cùng engine VideOCR, không clone repo)
+# Trích xuất phụ đề (EasyOCR — chạy được trên Python 3.14)
 opencv-python>=4.8.0
 numpy>=1.24.0
-paddleocr>=2.7.0
+easyocr>=1.7.0
 
-# paddlepaddle: cài riêng nếu pip báo thiếu (Python 3.14 có thể chỉ cần paddleocr):
-#   pip install paddlepaddle
-# GPU: pip install paddlepaddle-gpu
+# Tuỳ chọn (Python 3.11–3.12 + paddlepaddle): pip install paddleocr paddlepaddle

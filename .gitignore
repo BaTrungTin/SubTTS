@@ -27,3 +27,4 @@ dist-ssr
 _vendor/
 python_services/videocr/
 python_services/videocr-runtime/
+python_services/.ocr-python-path

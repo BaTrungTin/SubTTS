@@ -35,24 +35,90 @@ const renderer = new RenderingManager();
 const translator = new TranslationService();
 
 let ocrReadyCache: boolean | null = null;
+let ocrEngineCache: Record<string, unknown> | null = null;
+
+const OCR_PYTHON_MARKER = path.join(__dirname, '../python_services/.ocr-python-path');
+const DEFAULT_PYTHON312 = path.join(
+  process.env.LOCALAPPDATA || '',
+  'Programs',
+  'Python',
+  'Python312',
+  'python.exe',
+);
+
+/** Python dùng cho OCR: ưu tiên 3.12 (PaddleOCR), không dùng 3.14 mặc định. */
+function resolveOcrPython(): { command: string; prefixArgs: string[]; label: string } {
+  const fromEnv = process.env.OCR_PYTHON?.trim();
+  if (fromEnv) {
+    return { command: fromEnv, prefixArgs: [], label: fromEnv };
+  }
+
+  if (fs.existsSync(OCR_PYTHON_MARKER)) {
+    const fromFile = fs.readFileSync(OCR_PYTHON_MARKER, 'utf8').trim();
+    if (fromFile && fs.existsSync(fromFile)) {
+      return { command: fromFile, prefixArgs: [], label: fromFile };
+    }
+  }
+
+  if (process.platform === 'win32') {
+    if (fs.existsSync(DEFAULT_PYTHON312)) {
+      return { command: DEFAULT_PYTHON312, prefixArgs: [], label: DEFAULT_PYTHON312 };
+    }
+    try {
+      const { execSync } = require('child_process');
+      execSync('py -3.12 -c "import sys"', { encoding: 'utf-8', timeout: 8000, stdio: 'pipe' });
+      return { command: 'py', prefixArgs: ['-3.12'], label: 'py -3.12' };
+    } catch {
+      /* fall through */
+    }
+  }
+
+  return { command: 'python', prefixArgs: [], label: 'python' };
+}
+
+function runOcrPythonJson(scriptName: string): Record<string, unknown> | null {
+  const { execSync } = require('child_process');
+  const pythonServicesDir = path.join(__dirname, '../python_services');
+  const scriptPath = path.join(pythonServicesDir, scriptName);
+  const { command, prefixArgs } = resolveOcrPython();
+  try {
+    const out = execSync([command, ...prefixArgs, scriptPath].map((a) => `"${a}"`).join(' '), {
+      encoding: 'utf-8',
+      timeout: 20000,
+      stdio: 'pipe',
+      shell: true,
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+        PYTHONPATH: [pythonServicesDir, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+      },
+    });
+    return JSON.parse(out.trim()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function getOcrEngineInfo(): Record<string, unknown> {
+  if (ocrEngineCache) return ocrEngineCache;
+  const detected = runOcrPythonJson('detect_ocr_engine.py');
+  const { label } = resolveOcrPython();
+  ocrEngineCache = detected
+    ? { ...detected, pythonCommand: label }
+    : { engine: 'none', pythonCommand: label, message: 'Chưa cài OCR trên Python 3.12.' };
+  return ocrEngineCache;
+}
 
 function checkOcrRuntimeReady(): boolean {
   if (ocrReadyCache !== null) return ocrReadyCache;
-  try {
-    const { execSync } = require('child_process');
-    execSync('python -c "import importlib.util; raise SystemExit(0 if importlib.util.find_spec(\'paddleocr\') else 1)"', {
-      encoding: 'utf-8',
-      timeout: 8000,
-      stdio: 'pipe',
-    });
-    ocrReadyCache = true;
-  } catch {
-    ocrReadyCache = false;
-  }
+  const info = getOcrEngineInfo();
+  ocrReadyCache = info.engine === 'paddle' || info.engine === 'easyocr';
   return ocrReadyCache;
 }
 
 app.get('/api/health', (_req, res) => {
+  const ocr = getOcrEngineInfo();
   res.json({
     ok: true,
     service: 'vibe-studio-server',
@@ -60,6 +126,9 @@ app.get('/api/health', (_req, res) => {
     version: 2,
     features: ['merge-vi-progress', 'translate-srt-file', 'large-srt', 'paddleocr-extract'],
     ocrRuntimeReady: checkOcrRuntimeReady(),
+    ocrEngine: ocr.engine,
+    ocrPython: ocr.pythonCommand,
+    ocrMessage: ocr.message,
   });
 });
 
@@ -233,6 +302,107 @@ app.post('/api/parse-subtitles', (req, res) => {
   }
 });
 
+// 2a. Gộp / lọc trùng SRT (OCR stutter) — ghi đè file gốc
+app.post('/api/cleanup-srt', (req, res) => {
+  const { filePath } = req.body;
+  if (!filePath || typeof filePath !== 'string') {
+    return res.status(400).json({ error: 'Missing filePath' });
+  }
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+  try {
+    const { execSync } = require('child_process');
+    const pythonServicesDir = path.join(__dirname, '../python_services');
+    const scriptPath = path.join(pythonServicesDir, 'run_srt_cleanup.py');
+    const { command, prefixArgs } = resolveOcrPython();
+    const out = execSync(
+      [command, ...prefixArgs, scriptPath, filePath, '0.82', '1.2']
+        .map((a) => `"${a}"`)
+        .join(' '),
+      {
+        encoding: 'utf-8',
+        timeout: 120000,
+        stdio: 'pipe',
+        shell: true,
+        env: {
+          ...process.env,
+          PYTHONIOENCODING: 'utf-8',
+          PYTHONUTF8: '1',
+          PYTHONPATH: [pythonServicesDir, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+        },
+      },
+    );
+    const result = JSON.parse(out.trim()) as {
+      before?: number;
+      after?: number;
+      merged?: number;
+      duplicatePairs?: unknown[];
+      duplicateCount?: number;
+      remainingDuplicates?: number;
+      error?: string;
+    };
+    if (result.error) {
+      return res.status(500).json({ error: result.error });
+    }
+    const subs = readSrtFile(filePath);
+    res.json({
+      before: result.before ?? subs.length,
+      after: result.after ?? subs.length,
+      merged: result.merged ?? 0,
+      duplicatePairs: result.duplicatePairs ?? [],
+      duplicateCount: result.duplicateCount ?? 0,
+      remainingDuplicates: result.remainingDuplicates ?? 0,
+      subtitles: subs,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+function runSrtPythonJson(scriptName: string, args: string[] = []): Record<string, unknown> | null {
+  const { execSync } = require('child_process');
+  const pythonServicesDir = path.join(__dirname, '../python_services');
+  const scriptPath = path.join(pythonServicesDir, scriptName);
+  const { command, prefixArgs } = resolveOcrPython();
+  try {
+    const out = execSync(
+      [command, ...prefixArgs, scriptPath, ...args].map((a) => `"${a}"`).join(' '),
+      {
+        encoding: 'utf-8',
+        timeout: 120000,
+        stdio: 'pipe',
+        shell: true,
+        env: {
+          ...process.env,
+          PYTHONIOENCODING: 'utf-8',
+          PYTHONUTF8: '1',
+          PYTHONPATH: [pythonServicesDir, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+        },
+      },
+    );
+    return JSON.parse(out.trim()) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+// 2a2. Phân tích trùng (không ghi file)
+app.post('/api/analyze-srt-duplicates', (req, res) => {
+  const { filePath } = req.body;
+  if (!filePath || typeof filePath !== 'string') {
+    return res.status(400).json({ error: 'Missing filePath' });
+  }
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+  const result = runSrtPythonJson('run_srt_analyze.py', [filePath]);
+  if (!result) {
+    return res.status(500).json({ error: 'Không phân tích được SRT.' });
+  }
+  res.json(result);
+});
+
 // 2b. Merge partial VI SRT into Chinese source (resume / dịch sót)
 app.post('/api/merge-vi-progress', (req, res) => {
   const { sourcePath, viPath } = req.body;
@@ -296,7 +466,8 @@ app.post('/api/save-temp-srt', (req, res) => {
 
 // 4. Start OCR with Real-time SSE Log streaming
 app.post('/api/start-ocr', (req, res) => {
-  const { videoPath, xMin, yMin, xMax, yMax, ocrProfile } = req.body;
+  const { videoPath, xMin, yMin, xMax, yMax, ocrProfile, ocrDownscale720 } = req.body;
+  const downscale720 = ocrDownscale720 !== false;
   const profile =
     ocrProfile === 'fast' || ocrProfile === 'balanced' || ocrProfile === 'accurate'
       ? ocrProfile
@@ -311,24 +482,36 @@ app.post('/api/start-ocr', (req, res) => {
   const tempSrtPath = path.join(os.tmpdir(), `ocr-sub-${Date.now()}.srt`);
   const pythonServicesDir = path.join(__dirname, '../python_services');
   const pythonScriptPath = path.join(pythonServicesDir, 'ocr_processor.py');
+  const { command, prefixArgs } = resolveOcrPython();
 
-  const pyProcess = spawn('python', [
-    pythonScriptPath,
-    videoPath,
-    xMin.toString(),
-    yMin.toString(),
-    xMax.toString(),
-    yMax.toString(),
-    tempSrtPath,
-    profile,
-  ], {
-    env: {
-      ...process.env,
-      PYTHONIOENCODING: 'utf-8',
-      PYTHONUTF8: '1',
-      PYTHONPATH: [pythonServicesDir, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+  const pyProcess = spawn(
+    command,
+    [
+      ...prefixArgs,
+      pythonScriptPath,
+      videoPath,
+      xMin.toString(),
+      yMin.toString(),
+      xMax.toString(),
+      yMax.toString(),
+      tempSrtPath,
+      profile,
+      downscale720 ? '1' : '0',
+    ],
+    {
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+        FLAGS_use_mkldnn: '0',
+        FLAGS_use_dnnl: '0',
+        FLAGS_enable_onednn: '0',
+        FLAGS_use_onednn: '0',
+        OMP_NUM_THREADS: '1',
+        PYTHONPATH: [pythonServicesDir, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
+      },
     },
-  });
+  );
 
   let errorOutput = '';
   const recentStdoutLines: string[] = [];

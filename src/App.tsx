@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   Film,
   Sliders,
@@ -14,6 +14,8 @@ import {
   Download
 } from 'lucide-react';
 import { SubtitleCropbox } from './components/SubtitleCropbox';
+import { SubtitleVideoOverlay } from './components/SubtitleVideoOverlay';
+import { srtTimestampToSeconds } from './utils/srtTime';
 import FileBrowser from './components/FileBrowser';
 import { apiGetJson, apiPostJson, apiPostSse, apiUrl } from './api/client';
 import { Select } from './components/ui/Select';
@@ -108,7 +110,16 @@ export default function App() {
   const [ocrStatus, setOcrStatus] = useState('Sẵn sàng trích xuất');
   const [isOcrRunning, setIsOcrRunning] = useState(false);
   const [ocrProfile, setOcrProfile] = useState<'accurate' | 'balanced' | 'fast'>('accurate');
+  const [ocrDownscale720, setOcrDownscale720] = useState(true);
+  const [showSubtitleOnVideo, setShowSubtitleOnVideo] = useState(true);
+  const [activeSubtitleIndex, setActiveSubtitleIndex] = useState(-1);
+  const [isCleaningSrt, setIsCleaningSrt] = useState(false);
+  const [duplicatePairs, setDuplicatePairs] = useState<
+    { indexA: number; indexB: number; kind: string; score: number; textA: string; textB: string; gapSec: number }[]
+  >([]);
   const [ocrRuntimeReady, setOcrRuntimeReady] = useState<boolean | null>(null);
+  const [ocrEngine, setOcrEngine] = useState<string | null>(null);
+  const [ocrEngineMessage, setOcrEngineMessage] = useState<string | null>(null);
 
   // Translation state
   const [translateProgress, setTranslateProgress] = useState(0);
@@ -142,11 +153,31 @@ export default function App() {
   const [largeTranslatedCount, setLargeTranslatedCount] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const subtitleListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    apiGetJson<{ ocrRuntimeReady?: boolean }>('/api/health')
-      .then((h) => setOcrRuntimeReady(Boolean(h.ocrRuntimeReady)))
-      .catch(() => setOcrRuntimeReady(null));
+    if (activeSubtitleIndex < 0 || !subtitleListRef.current) return;
+    const el = subtitleListRef.current.querySelector(
+      `[data-sub-idx="${activeSubtitleIndex}"]`
+    );
+    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [activeSubtitleIndex]);
+
+  useEffect(() => {
+    apiGetJson<{
+      ocrRuntimeReady?: boolean;
+      ocrEngine?: string;
+      ocrMessage?: string;
+    }>('/api/health')
+      .then((h) => {
+        setOcrRuntimeReady(Boolean(h.ocrRuntimeReady));
+        setOcrEngine(typeof h.ocrEngine === 'string' ? h.ocrEngine : null);
+        setOcrEngineMessage(typeof h.ocrMessage === 'string' ? h.ocrMessage : null);
+      })
+      .catch(() => {
+        setOcrRuntimeReady(null);
+        setOcrEngine(null);
+      });
   }, []);
 
   const handleImportVideo = async () => {
@@ -312,6 +343,7 @@ export default function App() {
       setSubtitleLineCount(parsed.length);
       setSubtitles(parsed);
       setTranslatedSubtitles(parsed.map((s) => ({ ...s, text: '' })));
+      void analyzeSrtDuplicates(path);
       setActiveTab('translate');
     } catch (e: any) {
       alert(`Lỗi đọc file phụ đề: ${e.message || e}`);
@@ -369,6 +401,7 @@ export default function App() {
         xMax: cropCoords.xMax,
         yMax: cropCoords.yMax,
         ocrProfile,
+        ocrDownscale720,
       }, (parsed) => {
         if (parsed.type === 'progress') {
           if (typeof parsed.progress === 'number') setOcrProgress(parsed.progress);
@@ -415,6 +448,7 @@ export default function App() {
       setSubtitles(parsed);
       setTranslatedSubtitles(parsed.map((s) => ({ ...s, text: '' })));
       setViSrtPath(null);
+      void analyzeSrtDuplicates(srtFilePath);
       setOcrStatus(`Hoàn tất! Đã trích xuất được ${parsed.length} câu thoại.`);
       setActiveTab('translate'); // Auto switch to next phase
     } catch (e: any) {
@@ -502,6 +536,112 @@ export default function App() {
     const suffix =
       hasPartialTranslation && untranslatedCount > 0 ? '_vi_partial' : '_vi';
     return `${baseName}${suffix}.srt`;
+  };
+
+  const getExtractedSrtFilename = (): string => {
+    const baseName =
+      videoPath?.split(/[\\/]/).pop()?.replace(/\.[^.]+$/i, '') || 'subtitles';
+    return `${baseName}_zh.srt`;
+  };
+
+  const buildSourceSrtContent = (): string => {
+    return subtitles
+      .map((sub) => `${sub.id}\n${sub.start} --> ${sub.end}\n${sub.text}\n`)
+      .join('\n');
+  };
+
+  const extractedSubtitleCount = largeSrtMode ? subtitleLineCount : subtitles.length;
+
+  const handleDownloadExtractedSrt = () => {
+    const filename = getExtractedSrtFilename();
+
+    if (sourceSrtPath) {
+      const link = document.createElement('a');
+      link.href = apiUrl(
+        `/api/download-file?path=${encodeURIComponent(sourceSrtPath)}`
+      );
+      link.download = filename;
+      link.click();
+      setOcrStatus(
+        `Đã tải xuống ${filename} (${extractedSubtitleCount.toLocaleString()} dòng)`
+      );
+      return;
+    }
+
+    if (subtitles.length > 0) {
+      const content = buildSourceSrtContent();
+      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+      setOcrStatus(`Đã tải xuống ${filename} (${subtitles.length} dòng)`);
+      return;
+    }
+
+    setOcrStatus('Chưa có file SRT đã trích xuất để tải về.');
+  };
+
+  const duplicateIndexSet = useMemo(() => {
+    const s = new Set<number>();
+    for (const p of duplicatePairs) {
+      s.add(p.indexA);
+      s.add(p.indexB);
+    }
+    return s;
+  }, [duplicatePairs]);
+
+  const analyzeSrtDuplicates = useCallback(async (filePath: string) => {
+    try {
+      const result = await apiPostJson<{
+        duplicatePairs?: typeof duplicatePairs;
+        duplicateCount?: number;
+      }>('/api/analyze-srt-duplicates', { filePath });
+      setDuplicatePairs(result.duplicatePairs ?? []);
+    } catch {
+      setDuplicatePairs([]);
+    }
+  }, []);
+
+  const handleCleanupSrt = async () => {
+    if (!sourceSrtPath) {
+      setOcrStatus('Chỉ gộp/lọc được file SRT đã lưu trên máy (sau OCR hoặc import SRT).');
+      return;
+    }
+    setIsCleaningSrt(true);
+    try {
+      const result = await apiPostJson<{
+        before: number;
+        after: number;
+        merged: number;
+        subtitles: SubtitleItem[];
+        duplicatePairs?: typeof duplicatePairs;
+        duplicateCount?: number;
+        remainingDuplicates?: number;
+      }>('/api/cleanup-srt', { filePath: sourceSrtPath });
+      setSubtitles(result.subtitles);
+      setSubtitleLineCount(result.subtitles.length);
+      setLargeSrtMode(false);
+      setActiveSubtitleIndex(-1);
+      setDuplicatePairs([]);
+      void analyzeSrtDuplicates(sourceSrtPath);
+      const kept =
+        result.before > 0
+          ? Math.round((result.after / result.before) * 100)
+          : 100;
+      setOcrStatus(
+        `Đã lọc SRT: ${result.before} → ${result.after} dòng (giữ ~${kept}%). ` +
+          `Chuẩn ~334 dòng/0531 (2).srt: SRT tay gần như giữ nguyên; OCR gộp theo mục tiêu đó. ` +
+          `Trước: ${result.duplicateCount ?? 0} cặp cần gộp; còn ${result.remainingDuplicates ?? 0}.`
+      );
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setOcrStatus(`Lỗi lọc SRT: ${msg}`);
+    } finally {
+      setIsCleaningSrt(false);
+    }
   };
 
   const handleDownloadTranslatedSrt = async () => {
@@ -971,7 +1111,7 @@ export default function App() {
               <div>
                 <h2 className="text-2xl font-black tracking-tight">Trích xuất Phụ đề OCR</h2>
                 <p className="text-xs text-gray-500">
-                  Trích xuất theo cách VideOCR (SSIM + PaddleOCR + gộp dòng), tích hợp trong app — không clone repo VideOCR.
+                  <b>Quét</b> khung hình liên tục, chỉ <b>OCR</b> khi vùng chữ đổi (ít ảnh hơn, nhanh hơn). Mỗi lần đổi nội dung = 1 dòng SRT.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2 justify-end">
@@ -1024,7 +1164,13 @@ export default function App() {
                         className="w-full h-full object-contain"
                         controls
                       />
-                      {/* Interactive Cropbox overlay */}
+                      <SubtitleVideoOverlay
+                        subtitles={subtitles}
+                        videoRef={videoRef}
+                        enabled={showSubtitleOnVideo && subtitles.length > 0}
+                        activeIndex={activeSubtitleIndex}
+                        onActiveIndexChange={setActiveSubtitleIndex}
+                      />
                       <SubtitleCropbox onChange={setCropCoords} />
                     </div>
                   ) : (
@@ -1037,28 +1183,58 @@ export default function App() {
                   )}
                 </div>
 
+                {ocrEngine && ocrRuntimeReady && (
+                  <div className="text-[10px] text-cyan-200/90 bg-cyan-500/10 border border-cyan-500/25 rounded-lg px-3 py-2 leading-relaxed">
+                    Engine OCR: <b>{ocrEngine === 'paddle' ? 'PaddleOCR' : 'EasyOCR'}</b> (Python 3.12)
+                    {ocrEngineMessage ? (
+                      <span className="block mt-0.5 text-gray-400 font-normal">{ocrEngineMessage}</span>
+                    ) : null}
+                  </div>
+                )}
                 {ocrRuntimeReady === false && (
                   <div className="text-[10px] text-red-200 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2 leading-relaxed">
-                    <b>Chưa cài PaddleOCR</b> (engine giống VideOCR, không cần clone repo). Trong terminal:
-                    <code className="block mt-1 text-red-100">pip install -r python_services\requirements.txt</code>
+                    <b>Chưa cài OCR trên Python 3.12</b>. Trong terminal:
+                    <code className="block mt-1 text-red-100">
+                      powershell -ExecutionPolicy Bypass -File scripts\setup-paddleocr.ps1
+                    </code>
                   </div>
                 )}
 
                 {videoPath && !isOcrRunning && (
                   <div className="flex flex-col gap-2">
-                    <label className="text-[10px] font-bold text-gray-400 uppercase">Chế độ trích xuất (PaddleOCR)</label>
+                    <label className="text-[10px] font-bold text-gray-400 uppercase">Chế độ trích xuất OCR</label>
                     <select
                       value={ocrProfile}
                       onChange={(e) => setOcrProfile(e.target.value as 'accurate' | 'balanced' | 'fast')}
                       className="h-9 rounded-lg bg-black/40 border border-white/10 text-xs px-3 text-cyan-100"
                     >
-                      <option value="accurate">Chính xác — đủ dòng, ít sót (khuyên dùng)</option>
-                      <option value="balanced">Cân bằng</option>
-                      <option value="fast">Nhanh — có thể thiếu / trùng nhẹ</option>
+                      <option value="accurate">Chính xác — gần file chuẩn, tốc độ vừa (khuyên dùng)</option>
+                      <option value="balanced">Cân bằng — nhanh hơn</option>
+                      <option value="fast">Nhanh — video dài, có thể thiếu vài câu</option>
                     </select>
+                    <label className="flex items-center gap-2 text-[10px] text-gray-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={ocrDownscale720}
+                        onChange={(e) => setOcrDownscale720(e.target.checked)}
+                        className="rounded border-white/20"
+                      />
+                      Tự giảm video xuống <b className="text-cyan-300">720p</b> khi quét (nhanh hơn với 1080p/4K)
+                    </label>
                     <p className="text-[10px] text-amber-200/90 leading-relaxed">
-                      Kéo khung cyan <b>sát một dòng</b> phụ đề Trung (có chừa mép trên/dưới). GPU NVIDIA giúp nhanh hơn nhiều.
+                      Khung cyan <b>chỉ một dòng</b> phụ đề. Sau OCR tự <b>gộp</b> dòng trùng (xem log &quot;đã gộp X dòng&quot;).
                     </p>
+                    {subtitles.length > 0 && (
+                      <label className="flex items-center gap-2 text-[10px] text-gray-400 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={showSubtitleOnVideo}
+                          onChange={(e) => setShowSubtitleOnVideo(e.target.checked)}
+                          className="rounded border-white/20"
+                        />
+                        Hiển thị phụ đề đã trích xuất trên video (timeline + chữ)
+                      </label>
+                    )}
                   </div>
                 )}
 
@@ -1100,30 +1276,101 @@ export default function App() {
 
                 {/* Visual Status Indicator for Loaded Video */}
                 {videoPath && !isOcrRunning && (
-                  <div className="flex items-center gap-3 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-bold animate-fadeIn">
-                    <CheckCircle className="w-5 h-5 shrink-0 animate-pulse text-emerald-400" />
-                    <div className="flex-1">
-                      <p className="font-black uppercase tracking-wider">Đã tải video thành công!</p>
-                      <p className="text-[10px] text-emerald-400/80 font-normal mt-0.5">
-                        {ocrStatus}
-                      </p>
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center gap-3 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-bold animate-fadeIn">
+                      <CheckCircle className="w-5 h-5 shrink-0 animate-pulse text-emerald-400" />
+                      <div className="flex-1">
+                        <p className="font-black uppercase tracking-wider">Đã tải video thành công!</p>
+                        <p className="text-[10px] text-emerald-400/80 font-normal mt-0.5">
+                          {ocrStatus}
+                        </p>
+                      </div>
                     </div>
+                    {(sourceSrtPath || subtitles.length > 0) && (
+                      <button
+                        type="button"
+                        onClick={handleDownloadExtractedSrt}
+                        className="w-full h-10 rounded-xl border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-2 hover:bg-cyan-500/20 transition-all"
+                      >
+                        <Download className="w-4 h-4" />
+                        Tải SRT đã trích xuất (.srt)
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
 
               {/* Right Side: Subtitles Editor Table */}
               <div className="glass-panel p-6 flex flex-col gap-4">
-                <div className="flex justify-between items-center">
-                  <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Danh sách phụ đề gốc ({subtitles.length})</h3>
+                <div className="flex justify-between items-center gap-2 flex-wrap">
+                  <div className="flex flex-col gap-0.5">
+                    <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">
+                      Danh sách phụ đề gốc ({extractedSubtitleCount.toLocaleString()})
+                    </h3>
+                    {duplicatePairs.length > 0 && (
+                      <p className="text-[10px] text-amber-300/90">
+                        {duplicatePairs.length} cặp cần gộp (trùng / mảnh OCR) — viền vàng.「Gộp / lọc」áp dụng cho mọi file SRT đang mở, ghi đè file gốc.
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {sourceSrtPath && subtitles.length > 0 && !largeSrtMode && (
+                      <button
+                        type="button"
+                        onClick={handleCleanupSrt}
+                        disabled={isCleaningSrt}
+                        className="h-8 px-3 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-200 text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5 hover:bg-amber-500/20 transition-all disabled:opacity-50"
+                      >
+                        {isCleaningSrt ? 'Đang lọc…' : 'Gộp / lọc trùng SRT'}
+                      </button>
+                    )}
+                    {(sourceSrtPath || subtitles.length > 0) && (
+                      <button
+                        type="button"
+                        onClick={handleDownloadExtractedSrt}
+                        className="h-8 px-3 rounded-lg border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5 hover:bg-cyan-500/20 transition-all"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        Tải SRT đã trích xuất
+                      </button>
+                    )}
+                  </div>
                 </div>
 
-                <div className="h-[400px] border border-white/5 bg-black/20 rounded-xl overflow-y-auto p-4 flex flex-col gap-2 custom-scrollbar">
+                <div
+                  ref={subtitleListRef}
+                  className="h-[400px] border border-white/5 bg-black/20 rounded-xl overflow-y-auto p-4 flex flex-col gap-2 custom-scrollbar"
+                >
                   {subtitles.length > 0 ? (
-                    subtitles.map((sub) => (
+                    subtitles.map((sub, idx) => (
                       <div
                         key={sub.id}
-                        className="p-3 rounded-lg border border-white/5 bg-white/5 flex flex-col gap-1 hover:border-cyan-500/30 transition-all group"
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => {
+                          const t = srtTimestampToSeconds(sub.start);
+                          if (videoRef.current) {
+                            videoRef.current.currentTime = t;
+                            void videoRef.current.play().catch(() => undefined);
+                          }
+                          setActiveSubtitleIndex(idx);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            const t = srtTimestampToSeconds(sub.start);
+                            if (videoRef.current) videoRef.current.currentTime = t;
+                            setActiveSubtitleIndex(idx);
+                          }
+                        }}
+                        data-sub-idx={idx}
+                        className={`p-3 rounded-lg border flex flex-col gap-1 transition-all cursor-pointer ${
+                          idx === activeSubtitleIndex
+                            ? 'border-cyan-400/60 bg-cyan-500/15 ring-1 ring-cyan-500/30'
+                            : duplicateIndexSet.has(idx)
+                              ? 'border-amber-400/50 bg-amber-500/10 hover:border-amber-400/60'
+                              : 'border-white/5 bg-white/5 hover:border-cyan-500/30'
+                        }`}
                       >
                         <div className="flex justify-between items-center text-[10px] font-mono text-cyan-400">
                           <span>#{sub.id}</span>
