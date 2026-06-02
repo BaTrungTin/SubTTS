@@ -1,0 +1,298 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.AudioEngine = void 0;
+const fluent_ffmpeg_1 = __importDefault(require("fluent-ffmpeg"));
+const ffmpeg_static_1 = __importDefault(require("ffmpeg-static"));
+const path_1 = __importDefault(require("path"));
+const fs_1 = __importDefault(require("fs"));
+const os_1 = __importDefault(require("os"));
+const SpeechSyncPlanner_1 = require("./SpeechSyncPlanner");
+if (ffmpeg_static_1.default) {
+    fluent_ffmpeg_1.default.setFfmpegPath(ffmpeg_static_1.default);
+    const ffprobePath = ffmpeg_static_1.default.replace('ffmpeg', 'ffprobe');
+    if (fs_1.default.existsSync(ffprobePath)) {
+        fluent_ffmpeg_1.default.setFfprobePath(ffprobePath);
+    }
+}
+class AudioEngine {
+    constructor() {
+        this.tempDir = path_1.default.join(os_1.default.tmpdir(), 'vibe-audio-mix');
+        this.tempCounter = 0;
+        if (!fs_1.default.existsSync(this.tempDir)) {
+            fs_1.default.mkdirSync(this.tempDir, { recursive: true });
+        }
+    }
+    tempPath(prefix, ext) {
+        this.tempCounter += 1;
+        return path_1.default.join(this.tempDir, `${prefix}-${this.tempCounter}.${ext}`);
+    }
+    clampSegment(start, duration, videoDuration) {
+        if (!Number.isFinite(start) || !Number.isFinite(duration) || videoDuration <= 0)
+            return null;
+        const safeStart = Math.max(0, Math.min(start, Math.max(0, videoDuration - 0.1)));
+        const maxDur = videoDuration - safeStart;
+        const safeDur = Math.min(Math.max(duration, 0.1), maxDur);
+        if (safeDur < 0.1)
+            return null;
+        return { start: safeStart, duration: safeDur };
+    }
+    /** Apply user TTS speed setting (1.0 = normal, 1.2 = faster). */
+    async adjustSpeechSpeed(inputPath, speed, outputPath) {
+        if (speed <= 0)
+            return inputPath;
+        return this.adjustAudioSpeed(inputPath, speed, outputPath);
+    }
+    async getDuration(filePath) {
+        return new Promise((resolve, reject) => {
+            fluent_ffmpeg_1.default.ffprobe(filePath, (err, metadata) => {
+                if (err)
+                    return reject(err);
+                resolve(metadata.format.duration || 0);
+            });
+        });
+    }
+    async renderFinalVideo(videoPath, subtitles, audioClips, mixing, mode, outputPath, onProgress) {
+        onProgress(0.5, 'Analyzing TTS clips and subtitle timeline...');
+        const parsedSubtitles = subtitles.map((sub, i) => {
+            const start = this.timeToSeconds(sub.start);
+            const end = this.timeToSeconds(sub.end);
+            return {
+                id: sub.id,
+                start,
+                end,
+                duration: Math.max(0.05, end - start),
+                clipPath: audioClips[i],
+            };
+        });
+        const ttsDurations = [];
+        for (let i = 0; i < parsedSubtitles.length; i++) {
+            ttsDurations.push(await this.getDuration(audioClips[i]));
+        }
+        const syncMode = mode === 'video-priority' ? 'video-priority' : 'hybrid';
+        let plan = (0, SpeechSyncPlanner_1.buildSyncPlan)(parsedSubtitles, ttsDurations, syncMode);
+        const videoDuration = await this.getDuration(videoPath);
+        plan = (0, SpeechSyncPlanner_1.attachFinalGap)(plan, videoDuration);
+        onProgress(0.52, `Sync plan: ${plan.items.length} lines · stretch ${plan.stats.stretchedSegments} · speed-up ${plan.stats.spedUpSegments} · overlap fixes ${plan.stats.overlapFixes}`);
+        onProgress(0.55, 'Preparing speech clips (speed-fit, trim, no overlap)...');
+        for (let i = 0; i < plan.items.length; i++) {
+            const item = plan.items[i];
+            const preparedPath = this.tempPath(`speech-${i}`, 'mp3');
+            item.adjustedTtsPath = await this.prepareSpeechClip(item.ttsPath, item.ttsSpeedFactor, syncMode === 'hybrid' ? item.ttsDuration : item.outputDuration, preparedPath);
+            onProgress(0.55 + 0.1 * (i / plan.items.length), `Prepared speech #${i + 1}/${plan.items.length} (${item.ttsDuration.toFixed(2)}s → slot ${item.outputDuration.toFixed(2)}s)`);
+        }
+        if (syncMode === 'video-priority') {
+            onProgress(0.68, 'Mode: Video Priority — fitting speech into subtitle slots without overlap...');
+            return this.mixVideoPriority(videoPath, plan, mixing, outputPath, onProgress);
+        }
+        onProgress(0.68, 'Mode: Hybrid — stretching video segments to match speech duration...');
+        return this.mixHybridStretch(videoPath, videoDuration, plan, mixing, outputPath, onProgress);
+    }
+    async prepareSpeechClip(inputPath, speedFactor, targetDuration, outputPath) {
+        const safeTarget = Math.max(0.1, targetDuration);
+        const tempSpeedPath = speedFactor > 1.01 ? this.tempPath('spd', 'mp3') : inputPath;
+        if (speedFactor > 1.01) {
+            await this.adjustAudioSpeed(inputPath, speedFactor, tempSpeedPath);
+        }
+        return this.trimAndPadAudio(tempSpeedPath, safeTarget, outputPath);
+    }
+    trimAndPadAudio(inputPath, targetDuration, outputPath) {
+        return new Promise((resolve, reject) => {
+            (0, fluent_ffmpeg_1.default)(inputPath)
+                .audioFilters([
+                `atrim=0:${targetDuration.toFixed(3)}`,
+                `apad=whole_dur=${targetDuration.toFixed(3)}`,
+            ])
+                .on('end', () => resolve(outputPath))
+                .on('error', reject)
+                .save(outputPath);
+        });
+    }
+    adjustAudioSpeed(inputPath, factor, outputPath) {
+        return new Promise((resolve, reject) => {
+            const safeFactor = Math.max(0.5, Math.min(factor, 2.5));
+            let filter = '';
+            if (safeFactor > 2.0) {
+                filter = 'atempo=2.0';
+            }
+            else if (safeFactor < 0.5) {
+                filter = 'atempo=0.5';
+            }
+            else {
+                filter = `atempo=${safeFactor}`;
+            }
+            (0, fluent_ffmpeg_1.default)(inputPath)
+                .audioFilters(filter)
+                .on('end', () => resolve(outputPath))
+                .on('error', reject)
+                .save(outputPath);
+        });
+    }
+    async mixVideoPriority(videoPath, plan, mixing, outputPath, onProgress) {
+        onProgress(0.75, 'Mixing synchronized speech onto original video...');
+        return this.overlaySpeechClips(videoPath, plan.items, mixing, outputPath, false);
+    }
+    async mixHybridStretch(videoPath, videoDuration, plan, mixing, outputPath, onProgress) {
+        const segmentFiles = [];
+        onProgress(0.7, 'Cutting and stretching video segments...');
+        for (const gap of plan.gaps) {
+            const window = this.clampSegment(gap.originalStart, gap.duration, videoDuration);
+            if (!window)
+                continue;
+            const gapPath = this.tempPath('gap', 'mp4');
+            await this.extractVideoSegment(videoPath, window.start, window.duration, gapPath, true);
+            segmentFiles.push(gapPath);
+        }
+        for (let i = 0; i < plan.items.length; i++) {
+            const item = plan.items[i];
+            const window = this.clampSegment(item.originalStart, item.originalSlotDuration, videoDuration);
+            if (!window) {
+                onProgress(0.7 + 0.08 * (i / plan.items.length), `Skip segment #${i + 1}: ngoài phạm vi video`);
+                continue;
+            }
+            const subPath = this.tempPath(`sub-${i}`, 'mp4');
+            await this.extractVideoSegment(videoPath, window.start, window.duration, subPath, true);
+            if (item.videoStretchFactor > 1.01) {
+                const stretchPath = this.tempPath(`stretch-${i}`, 'mp4');
+                onProgress(0.7 + 0.08 * (i / plan.items.length), `Stretch segment #${i + 1}: ${window.duration.toFixed(2)}s → ${item.outputDuration.toFixed(2)}s (×${item.videoStretchFactor.toFixed(2)})`);
+                await this.stretchVideoSegment(subPath, item.videoStretchFactor, item.outputDuration, stretchPath);
+                segmentFiles.push(stretchPath);
+            }
+            else {
+                segmentFiles.push(subPath);
+            }
+        }
+        if (plan.finalGap) {
+            const window = this.clampSegment(plan.finalGap.originalStart, plan.finalGap.duration, videoDuration);
+            if (window) {
+                const finalGapPath = this.tempPath('gap-final', 'mp4');
+                await this.extractVideoSegment(videoPath, window.start, window.duration, finalGapPath, true);
+                segmentFiles.push(finalGapPath);
+            }
+        }
+        if (segmentFiles.length === 0) {
+            throw new Error('Không tạo được segment video hợp lệ — kiểm tra timestamp phụ đề và độ dài video.');
+        }
+        onProgress(0.82, `Merging ${segmentFiles.length} video segments...`);
+        const mergedVideoPath = this.tempPath('merged-video', 'mp4');
+        await this.concatenateVideos(segmentFiles, mergedVideoPath);
+        onProgress(0.88, 'Overlaying synchronized dubbing audio...');
+        return this.overlaySpeechClips(mergedVideoPath, plan.items, mixing, outputPath, true);
+    }
+    overlaySpeechClips(videoPath, items, mixing, outputPath, reencodeVideo) {
+        return new Promise((resolve, reject) => {
+            const command = (0, fluent_ffmpeg_1.default)(videoPath);
+            const speechClips = items.map((item) => item.adjustedTtsPath || item.ttsPath);
+            speechClips.forEach((clip) => command.input(clip));
+            const filterComplex = [];
+            const amixInputs = [];
+            const volume = (mixing.ai || 100) / 100;
+            let audioCount = 1;
+            items.forEach((item) => {
+                const delayMs = Math.max(0, Math.round(item.outputStart * 1000));
+                filterComplex.push(`[${audioCount}:a]adelay=${delayMs}|${delayMs},volume=${volume}[a${audioCount}]`);
+                amixInputs.push(`[a${audioCount}]`);
+                audioCount++;
+            });
+            if (mixing.keepOriginal) {
+                const bgVol = (mixing.bg || 20) / 100;
+                filterComplex.push(`[0:a]volume=${bgVol}[bg_aud]`);
+                amixInputs.unshift(`[bg_aud]`);
+            }
+            filterComplex.push(`${amixInputs.join('')}amix=inputs=${amixInputs.length}:duration=longest:dropout_transition=0[mix_out]`);
+            const outputOptions = reencodeVideo
+                ? ['-map 0:v', '-map [mix_out]', '-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-b:a 192k']
+                : ['-c:v copy', '-map 0:v', '-map [mix_out]', '-c:a aac', '-b:a 192k'];
+            command
+                .complexFilter(filterComplex)
+                .outputOptions(outputOptions)
+                .on('end', () => resolve(outputPath))
+                .on('error', reject)
+                .save(outputPath);
+        });
+    }
+    extractVideoSegment(videoPath, start, duration, outputPath, keepAudio) {
+        return new Promise((resolve, reject) => {
+            const cmd = (0, fluent_ffmpeg_1.default)(videoPath)
+                .setStartTime(start)
+                .setDuration(duration)
+                .outputOptions([
+                '-c:v libx264',
+                '-pix_fmt yuv420p',
+                '-movflags +faststart',
+                ...(keepAudio ? ['-c:a aac', '-b:a 128k'] : ['-an']),
+            ]);
+            cmd
+                .on('end', () => {
+                if (!fs_1.default.existsSync(outputPath) || fs_1.default.statSync(outputPath).size < 1024) {
+                    reject(new Error(`Segment rỗng: ${outputPath}`));
+                    return;
+                }
+                resolve(outputPath);
+            })
+                .on('error', reject)
+                .save(outputPath);
+        });
+    }
+    stretchVideoSegment(inputPath, factor, targetDuration, outputPath) {
+        return new Promise((resolve, reject) => {
+            const safeFactor = Math.max(1.01, Math.min(factor, 12));
+            const safeDuration = Math.max(0.15, targetDuration);
+            (0, fluent_ffmpeg_1.default)(inputPath)
+                .videoFilters(`setpts=${safeFactor.toFixed(4)}*PTS`)
+                .outputOptions([
+                '-an',
+                '-c:v libx264',
+                '-pix_fmt yuv420p',
+                '-movflags +faststart',
+                `-t ${safeDuration.toFixed(3)}`,
+            ])
+                .on('end', () => {
+                if (!fs_1.default.existsSync(outputPath) || fs_1.default.statSync(outputPath).size < 1024) {
+                    reject(new Error(`Stretch segment rỗng (×${safeFactor.toFixed(2)}): ${outputPath}`));
+                    return;
+                }
+                resolve(outputPath);
+            })
+                .on('error', (err) => {
+                reject(new Error(`Stretch video thất bại (×${safeFactor.toFixed(2)}): ${err.message}`));
+            })
+                .save(outputPath);
+        });
+    }
+    concatenateVideos(filePaths, outputPath) {
+        return new Promise((resolve, reject) => {
+            const listFilePath = this.tempPath('filelist', 'txt');
+            const listContent = filePaths.map((fp) => `file '${fp.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n');
+            fs_1.default.writeFileSync(listFilePath, listContent, 'utf-8');
+            (0, fluent_ffmpeg_1.default)()
+                .input(listFilePath)
+                .inputOptions(['-f concat', '-safe 0'])
+                .outputOptions(['-c:v libx264', '-pix_fmt yuv420p', '-c:a aac', '-b:a 128k'])
+                .on('end', () => resolve(outputPath))
+                .on('error', (err) => {
+                reject(new Error(`Ghép video thất bại: ${err.message}`));
+            })
+                .save(outputPath);
+        });
+    }
+    timeToSeconds(timeStr) {
+        const parts = timeStr.split(':');
+        const secondsParts = parts[2].split(',');
+        const hours = parseInt(parts[0], 10);
+        const minutes = parseInt(parts[1], 10);
+        const seconds = parseInt(secondsParts[0], 10);
+        const ms = parseInt(secondsParts[1], 10);
+        return hours * 3600 + minutes * 60 + seconds + ms / 1000;
+    }
+    async clearCache() {
+        this.tempCounter = 0;
+        if (fs_1.default.existsSync(this.tempDir)) {
+            fs_1.default.rmSync(this.tempDir, { recursive: true, force: true });
+            fs_1.default.mkdirSync(this.tempDir, { recursive: true });
+        }
+    }
+}
+exports.AudioEngine = AudioEngine;
